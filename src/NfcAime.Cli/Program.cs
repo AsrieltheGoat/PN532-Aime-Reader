@@ -67,13 +67,16 @@ internal static class Program
         using var transport = new SerialFrameTransport(options.Port, options.Baud, timeout);
         using var session = new Pn532Session(transport, timeout, options.Retries);
         session.Open();
-        try
-        {
-            var result = RunPn532FelicaFlow(session);
+
+        var result = RunPn532FelicaFlow(session);
+        if (result.Error != null) {
+            Console.WriteLine(result.Error);
+        }
+        else {
             Console.WriteLine($"CardId: {Convert.ToHexString(result.CardId)}");
             Console.WriteLine($"AccessCode: {result.AccessCode}");
         }
-        finally { session.Close(); }
+        session.Close();
     }
 
     private static void RunReplay(CliOptions options)
@@ -83,13 +86,17 @@ internal static class Program
         using var transport = new ReplayFrameTransport(frames, options.ReplayCorrupt);
         using var session = new Pn532Session(transport, timeout, options.Retries);
         session.Open();
-        try
-        {
-            var result = RunPn532FelicaFlow(session);
+
+        var result = RunPn532FelicaFlow(session);
+        if (result.Error != null) {
+            Console.WriteLine(result.Error);
+            session.Close();
+        }
+        else {
             Console.WriteLine($"CardId: {Convert.ToHexString(result.CardId)}");
             Console.WriteLine($"AccessCode: {result.AccessCode}");
         }
-        finally { session.Close(); }
+        session.Close();
     }
 
     private static void RunDiag(CliOptions options)
@@ -118,37 +125,37 @@ internal static class Program
 
     private enum CardKind { Felica, MifareClassic }
     private sealed record CardTarget(CardKind Kind, byte Tg, byte[] CardId);
-    private sealed record FlowResult(byte[] CardId, string AccessCode);
+    private sealed record FlowResult(byte[]? CardId, string? AccessCode, string? Error);
 
     private static FlowResult RunPn532FelicaFlow(Pn532Session session)
     {
-        ExpectPn532ResponseCode(session.SendCommand(new byte[] { 0x02 }), expectedResponseCode: 0x03);
-        ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x14, 0x01 }), expectedResponseCode: 0x15);
-        ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x32, 0x01, 0x03 }), expectedResponseCode: 0x33);
+        try {
+            ExpectPn532ResponseCode(session.SendCommand(new byte[] { 0x02 }), expectedResponseCode: 0x03);
+            ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x14, 0x01 }), expectedResponseCode: 0x15);
+            ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x32, 0x01, 0x03 }), expectedResponseCode: 0x33);
 
-        var target = WaitForCard(session);
-        Thread.Sleep(100);
+            var target = WaitForCard(session);
+            Thread.Sleep(100);
 
-        if (target.Kind == CardKind.Felica)
-        {
-            Console.WriteLine($"Card detected! IDm: {Convert.ToHexString(target.CardId)}");
-            var readCmd = FelicaCommandBuilder.BuildReadWithoutEncryptionCommand(target.CardId);
-            var readResponse = SendInDataExchange(session, target.Tg, readCmd, TimeSpan.FromSeconds(5));
-            var spad0 = FelicaResponseParser.ParseSpad0(readResponse);
-            var decryptor = new FeliCaDecryptor();
-            var decrypted = decryptor.Decrypt(spad0);
-            var accessCode = AccessCodeFormatter.ToAccessCodeString(decrypted);
-            return new FlowResult(target.CardId, accessCode);
+            if (target.Kind == CardKind.Felica)
+            {
+                Console.WriteLine($"Card detected! IDm: {Convert.ToHexString(target.CardId)}");
+                var readCmd = FelicaCommandBuilder.BuildReadWithoutEncryptionCommand(target.CardId);
+                var readResponse = SendInDataExchange(session, target.Tg, readCmd, TimeSpan.FromSeconds(5));
+                var spad0 = FelicaResponseParser.ParseSpad0(readResponse);
+                var decryptor = new FeliCaDecryptor();
+                var decrypted = decryptor.Decrypt(spad0);
+                var accessCode = AccessCodeFormatter.ToAccessCodeString(decrypted);
+                return new FlowResult(target.CardId, accessCode, null);
+            }
+
+            Console.WriteLine($"Card detected! TypeA UID: {Convert.ToHexString(target.CardId)}");
+            var m1AccessCode = TryReadMifareClassicAccessCode(session, target.Tg, target.CardId);
+            return new FlowResult(target.CardId, m1AccessCode, null);
         }
-
-        Console.WriteLine($"Card detected! TypeA UID: {Convert.ToHexString(target.CardId)}");
-        var m1AccessCode = TryReadMifareClassicAccessCode(session, target.Tg, target.CardId);
-        if (m1AccessCode is null)
-        {
-            throw new InvalidOperationException("Failed to read Mifare Classic AccessCode: no key matched sector 0.");
+        catch (Exception e) {
+            return new FlowResult(null, null, e.ToString());
         }
-
-        return new FlowResult(target.CardId, m1AccessCode);
     }
 
     private static CardTarget WaitForCard(Pn532Session session)

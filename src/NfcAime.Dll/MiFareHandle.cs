@@ -61,6 +61,13 @@ public static class MiFareHandle
             Array.Copy(response.Payload, 2, data, 0, data.Length);
         }
 
+        // If the reader returned fewer than 16 data bytes, treat it as an error
+        // instead of silently zero-padding — callers expect a full 16-byte block.
+        if (data.Length < 16)
+        {
+            throw new InvalidOperationException($"Mifare read block returned short payload: {data.Length} bytes (expected 16). Response payload length: {response.Payload.Length}");
+        }
+
         var result = new byte[16];
         Array.Copy(data, 0, result, 0, 16);
         return result;

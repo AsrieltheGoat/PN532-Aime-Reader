@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -15,12 +16,23 @@ public class AimeReader
     private Pn532Session session = null;
 
     public enum CardKind { Felica, MifareClassic, Null}
-    private sealed record FlowResult(CardKind CardKind, byte[] CardId, string AccessCode);
+
+    /// <summary>
+    /// 指示读卡器当前是否处于错误状态。
+    /// </summary>
+    /// <remarks>
+    /// 当读卡或相关操作过程中发生错误时，该变量通常会被设置为 <c>true</c>，
+    /// 并且可以通过调用 <see cref="AimeReader.ClearError"/> 方法将其清除。当 <c>IsError</c> 为 <c>true</c> 时，
+    /// 表示读卡器遇到了可能影响后续操作正常执行的故障。
+    /// </remarks>
+    public bool IsError;
+    private sealed record FlowResult(CardKind CardKind, byte[]? CardId, string? AccessCode, string? Error);
     private sealed record CardTarget(CardKind Kind, byte Tg, byte[] CardId);
 
     // 兼容低版本 .NET：实现 ToHexString 和 FromHexString
-    public static string ToHexString(byte[] bytes)
+    public static string ToHexString(byte[]? bytes)
     {
+        if (bytes == null || bytes.Length == 0) return string.Empty;
         return BitConverter.ToString(bytes).Replace("-", "");
     }
 
@@ -38,24 +50,35 @@ public class AimeReader
     {
         Port = port;
         Baud = baud;
+        ClearError();
         TimeSpan timeout = TimeSpan.FromMilliseconds(100);
         using var transport = new SerialFrameTransport(Port, Baud, timeout);
         session = new Pn532Session(transport, timeout, 0);
     }
 
-    public (CardKind CardKind, byte[] IDm, string AccessCode) ReadCard()
+    public void ClearError() {
+        IsError = false;
+    }
+
+    public (CardKind CardKind, byte[]? IDm, string? AccessCode) ReadCard()
     {
         try
         {
             session.Open();
             var result = RunPn532Flow(session);
+            if (result.Error != null)
+            {
+                Console.WriteLine($"Error during card read: {result.Error}");
+                IsError = true;
+            }
+            session.Close();
             return (result.CardKind , result.CardId, result.AccessCode);
         } catch (Exception ex)
         {
-            Console.WriteLine($"Error during card read: {ex.Message}");
-            return (CardKind.Null, Array.Empty<byte>(), "");
+            Console.WriteLine($"Open Device Error: {ex.Message}");
+            IsError = true;
+            return (CardKind.Null, Array.Empty<byte>(), null);
         }
-        finally { session.Close(); }
     }
 
     public void CloseReader()
@@ -65,36 +88,40 @@ public class AimeReader
 
     private FlowResult RunPn532Flow(Pn532Session session)
     {
-        ExpectPn532ResponseCode(session.SendCommand(new byte[] { 0x02 }), expectedResponseCode: 0x03);
-        ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x14, 0x01 }), expectedResponseCode: 0x15);
-        ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x32, 0x01, 0x03 }), expectedResponseCode: 0x33);
+        try {
+            ExpectPn532ResponseCode(session.SendCommand(new byte[] { 0x02 }), expectedResponseCode: 0x03);
+            ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x14, 0x01 }), expectedResponseCode: 0x15);
+            ExpectPn532StatusOk(session.SendCommand(new byte[] { 0x32, 0x01, 0x03 }), expectedResponseCode: 0x33);
 
-        var target = WaitForCard(session);
-        Thread.Sleep(100);
-        if (target.Kind == CardKind.Null)
-        {
-            return new FlowResult(target.Kind, target.CardId, "");
+            var target = WaitForCard(session);
+            Thread.Sleep(100);
+            if (target.Kind == CardKind.Null)
+            {
+                return new FlowResult(target.Kind, target.CardId, null, null);
+            }
+            if (target.Kind == CardKind.Felica)
+            {
+                Console.WriteLine($"Card detected! IDm: {ToHexString(target.CardId)}");
+                var readCmd = FelicaCommandBuilder.BuildReadWithoutEncryptionCommand(target.CardId);
+                var readResponse = SendInDataExchange(session, target.Tg, readCmd, TimeSpan.FromSeconds(5));
+                var spad0 = FelicaResponseParser.ParseSpad0(readResponse);
+                var decryptor = new FeliCaDecryptor();
+                var decrypted = decryptor.Decrypt(spad0);
+                var accessCode = AccessCodeFormatter.ToAccessCodeString(decrypted);
+                return new FlowResult(target.Kind, target.CardId, accessCode, null);
+            }
+
+            Console.WriteLine($"Card detected! TypeA UID: {ToHexString(target.CardId)}");
+            var m1AccessCode = TryReadMifareClassicAccessCode(session, target.Tg, target.CardId);
+            if (m1AccessCode != null) {
+                return new FlowResult(target.Kind, target.CardId, m1AccessCode, null);
+            }
+            return new FlowResult(target.Kind, target.CardId, m1AccessCode, "Failed to read Mifare Classic AccessCode: no key matched sector 0.");
         }
-        if (target.Kind == CardKind.Felica)
-        {
-            Console.WriteLine($"Card detected! IDm: {ToHexString(target.CardId)}");
-            var readCmd = FelicaCommandBuilder.BuildReadWithoutEncryptionCommand(target.CardId);
-            var readResponse = SendInDataExchange(session, target.Tg, readCmd, TimeSpan.FromSeconds(5));
-            var spad0 = FelicaResponseParser.ParseSpad0(readResponse);
-            var decryptor = new FeliCaDecryptor();
-            var decrypted = decryptor.Decrypt(spad0);
-            var accessCode = AccessCodeFormatter.ToAccessCodeString(decrypted);
-            return new FlowResult(target.Kind, target.CardId, accessCode);
+        catch (Exception e) {
+            return new FlowResult(CardKind.Null, null, null, e.Message);
         }
 
-        Console.WriteLine($"Card detected! TypeA UID: {ToHexString(target.CardId)}");
-        var m1AccessCode = TryReadMifareClassicAccessCode(session, target.Tg, target.CardId);
-        if (m1AccessCode is null)
-        {
-            throw new InvalidOperationException("Failed to read Mifare Classic AccessCode: no key matched sector 0.");
-        }
-
-        return new FlowResult(target.Kind, target.CardId, m1AccessCode);
     }
 
     private byte[] SendInDataExchange(Pn532Session session, byte tg, ReadOnlySpan<byte> payloadToTarget, TimeSpan? timeout = null)
@@ -112,8 +139,10 @@ public class AimeReader
     private string? TryReadMifareClassicAccessCode(Pn532Session session, byte tg, ReadOnlySpan<byte> uid)
     {
         const byte blockNumber = 2; // sector 0 block 2
-        var uid4 = new byte[4];
-        Array.Copy(uid.ToArray(), 0, uid4, 0, 4);
+        // Ensure UID is at least 4 bytes before copying; if it's shorter the Mifare
+        // authentication can't proceed.
+        if (uid.Length < 4) return null;
+        var uid4 = uid.Slice(0, 4).ToArray();
 
         foreach (var keyHex in MifareClassicKeys)
         {
@@ -123,6 +152,9 @@ public class AimeReader
             {
                 var block = ReadMifareBlock(session, tg, blockNumber);
                 var hex = ToHexString(block);
+                if (hex == "") {
+                    throw new InvalidOperationException("Mifare read block returned empty data.");
+                }
 
                 return hex.Length <= 20 ? hex : hex.Substring(hex.Length - 20, 20);
             }
@@ -152,6 +184,10 @@ public class AimeReader
 
         var a106 = session.SendCommand(new byte[] { 0x4A, 0x01, 0x00 }, TimeSpan.FromMilliseconds(600));
         if (ExtractTypeATarget(a106, out target)) return target;
+
+        if (f212.Error != null) throw new Exception(f212.Error);
+
+        if (a106.Error != null) throw new Exception(a106.Error);
 
         return new CardTarget(CardKind.Null, 0, [0]);
     }

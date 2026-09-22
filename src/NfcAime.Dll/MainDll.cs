@@ -39,8 +39,13 @@ namespace NfcAime.Dll {
         [DllExport("aime_io_nfc_poll", CallingConvention = CallingConvention.StdCall)]
         public static int NfcPoll(byte unitNo)
         {
+            cardKind = AimeReader.CardKind.Null;
             Console.WriteLine(">> Polling...");
             (cardKind, idm, accessCode) = reader.ReadCard();
+            if (reader.IsError && idm == new byte[] {0x00}) {
+                reader.ClearError();
+            }
+            // Console.WriteLine($"Card Kind: {cardKind}, IDm: {AimeReader.ToHexString(idm)}, AccessCode: {accessCode}");
             return 0;
         }
 
@@ -53,24 +58,24 @@ namespace NfcAime.Dll {
             {
                 return 1;
             }
-            if (accessCode == null)
-            {
-                return 1;
-            }
 
             if (Config.IDmMode == 1 && cardKind == AimeReader.CardKind.Felica)
             {
                 return 1;
             }
-            if (cardKind == AimeReader.CardKind.Null)
+            if (!reader.IsError && cardKind == AimeReader.CardKind.Null)
             {
                 return 1;
             }
 
+            if (reader.IsError || accessCode == null) {
+                accessCode = "01234567891234567890";
+            }
             //将卡号复制到缓存区以传递给游戏
+            Console.WriteLine("IsError: " + reader.IsError);
             Marshal.Copy(AccessCodeFormatter.ToAccessCodeBytes(accessCode), 0, luid, (int)luidSize);
             Console.WriteLine("# " + cardKind + " !!");
-            Console.WriteLine("<< AccessCode");
+            Console.WriteLine("<< AccessCode"+accessCode);
             return 0;
         }
 
@@ -78,21 +83,29 @@ namespace NfcAime.Dll {
         [DllExport("aime_io_nfc_get_felica_id", CallingConvention = CallingConvention.StdCall)]
         public static unsafe int GetFelicaId(byte unitNo, ulong* iDM)
         {
-            if (idm == null)
-            {
-                return 1;
-            }
 
             if (cardKind == AimeReader.CardKind.Felica && Config.IDmMode == 1) //防止传入M1卡
             {
+                if (accessCode == null) {
+                    reader.IsError = true;
+                }
                 ulong idmValue = 0;
-                for (var i = 0; i < 8; i++)
+                if (!reader.IsError)
                 {
-                    idmValue = (idmValue << 8) | idm[i];
+                    try {
+                        for (int i = 0; i < 8; i++)
+                        {
+                            idmValue = (idmValue << 8) | idm[i];
+                        }
+                    }
+                    catch (Exception e) {
+                        reader.IsError = true;
+                    }
                 }
 
                 *iDM = idmValue;
                 Console.WriteLine("<< IDm");
+                cardKind = AimeReader.CardKind.Null;
                 return 0;
             }
             return 1;
@@ -127,52 +140,91 @@ namespace NfcAime.Dll {
             public uint clear_seq;
         }
 
-        // 设置 VFD 屏幕文本
+        /// <summary>
+        /// 设置 VFD 屏幕文本
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_vfd_set_text", CallingConvention = CallingConvention.Cdecl)]
         public static void aime_io_vfd_set_text(IntPtr text, nuint text_len, IntPtr state)
         {
         }
 
-        // 设置 VFD 屏幕状态
+        /// <summary>
+        /// 设置 VFD 屏幕状态
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_vfd_set_state", CallingConvention = CallingConvention.Cdecl)]
         public static void aime_io_vfd_set_state(IntPtr state)
         {
         }
 
-        // ==========================================
-        // aimeio api v1.1 新增：
-        // ==========================================
-
-        // 获取 MIFARE 4 字节 UID
+        /// <summary>
+        /// 获取 MIFARE 4 字节 UID
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_get_mifare_uid", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_get_mifare_uid(byte unit_no, IntPtr uid, nuint uid_size)
         {
             return 1;
         }
 
-        // 选中指定 UID 的卡片
+        /// <summary>
+        /// 选中指定 UID 的卡片
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_mifare_select", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_mifare_select(byte unit_no, IntPtr uid, nuint uid_size)
         {
             return 1;
         }
 
-        // 设置 MIFARE 认证密钥
+        /// <summary>
+        /// 设置 MIFARE 认证密钥
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_mifare_set_key", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_mifare_set_key(byte unit_no, byte key_type, IntPtr key, nuint key_size)
         {
             return 1;
         }
 
-        // MIFARE 扇区认证
+        /// <summary>
+        /// MIFARE 扇区认证
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_mifare_authenticate", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_mifare_authenticate(byte unit_no, byte key_type, IntPtr payload, nuint payload_size)
         {
             return 1;
         }
 
-        // 读取 MIFARE 16 字节数据块
-        // 错误注入：返回 E_FAIL，触发游戏M1“读卡失败”错误
+        /// <summary>
+        /// 一个错误计数器，满足>=2时应重置读卡器错误
+        /// </summary>
+        /// <remarks>
+        /// 对于aime_io_nfc_mifare_read_block，segatools会调用 4 次在一次poll周期中
+        /// 4次调用需要都返回E_FAIL才会触发错误，故设置一个计数器
+        /// </remarks>
+        private static int _mifareErrorCount = 0;
+        /// <summary>
+        /// 读取 MIFARE 16 字节数据块
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// 错误注入：返回 E_FAIL，触发游戏M1“读卡失败”错误
+        /// </remarks>
         [DllExport("aime_io_nfc_mifare_read_block", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_mifare_read_block(
             byte unit_no,
@@ -183,14 +235,32 @@ namespace NfcAime.Dll {
             nuint block_size)
         {
             // 若要注入错误触发游戏读卡异常，返回 E_FAIL：
-            // return E_FAIL;
-
-            // 默认正常放行：
+            if (reader.IsError) {
+                _mifareErrorCount++;
+                if (_mifareErrorCount >= 4) {
+                    reader.ClearError();
+                    _mifareErrorCount = 0;
+                }
+                return unchecked((int)0x8000FFFFL);
+            }
             return 1;
         }
 
-        // FeliCa 底层请求交互透传
-        // 错误注入：返回 E_FAIL，触发游戏Felica“读卡失败”错误
+        /// <summary>
+        /// 一个错误计数器，满足>=4时应重置读卡器错误
+        /// </summary>
+        /// <remarks>
+        /// 对于aime_io_nfc_felica_transact，segatools会调用 2 次在一次poll周期中
+        /// 2次调用需要都返回E_FAIL才会触发错误，故设置一个计数器
+        /// </remarks>
+        private static int _feliCaErrorCount = 0;
+        /// <summary>
+        /// FeliCa 底层请求交互透传
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// 错误注入：返回 E_FAIL，触发游戏Felica“读卡失败”错误
+        /// </remarks>
         [DllExport("aime_io_nfc_felica_transact", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_felica_transact(
             byte unit_no,
@@ -200,31 +270,59 @@ namespace NfcAime.Dll {
             nuint res_size,
             IntPtr res_size_written)
         {
+            if (reader.IsError) {
+                _feliCaErrorCount++;
+                if (_feliCaErrorCount >= 2) {
+                    reader.ClearError();
+                    _feliCaErrorCount = 0;
+                }
+                return unchecked((int)0x8000FFFFL);
+            }
             return 1;
         }
 
-        // 开启射频场
+        /// <summary>
+        /// 开启射频场
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_radio_on", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_radio_on(byte unit_no)
         {
             return 1;
         }
 
-        // 关闭射频场
+        /// <summary>
+        /// 关闭射频场
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_radio_off", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_radio_off(byte unit_no)
         {
             return 1;
         }
 
-        // 进入固件升级模式
+        /// <summary>
+        /// 进入固件升级模式
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_to_update_mode", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_to_update_mode(byte unit_no)
         {
             return 1;
         }
 
-        // 发送原生 HEX 数据指令
+        /// <summary>
+        /// 发送原生 HEX 数据指令
+        /// </summary>
+        /// <remarks>
+        /// AimeIO API Ver = 1.1;
+        /// </remarks>
         [DllExport("aime_io_nfc_send_hex_data", CallingConvention = CallingConvention.Cdecl)]
         public static int aime_io_nfc_send_hex_data(
             byte unit_no,

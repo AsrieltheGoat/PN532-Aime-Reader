@@ -28,10 +28,11 @@ namespace NfcAime.Dll.PN532 {
             var responseReadTimeout = responseTimeout ?? _timeout;
             var frame = Pn532HsuFrame.BuildDataFrame(Pn532HsuFrame.HostToPn532Tfi, payload);
             var maxAttempts = _maxRetries + 1;
+            Pn532FrameParseResult ack = null;
             for (var attempt = 0; attempt < maxAttempts; attempt++)
             {
                 _transport.WriteFrame(frame);
-                var ack = _transport.ReadFrame(_timeout);
+                ack = _transport.ReadFrame(_timeout);
                 if (ack.Kind == Pn532FrameKind.Ack)
                 {
                     var response = _transport.ReadFrame(responseReadTimeout);
@@ -91,7 +92,7 @@ namespace NfcAime.Dll.PN532 {
             return new Pn532FrameParseResult
             {
                 Kind = Pn532FrameKind.Invalid,
-                Error = "Retry limit exceeded (no valid ACK/response). Check COM port, baud rate, module mode (HSU/UART), and power."
+                Error = ack?.Error
             };
         }
     }
