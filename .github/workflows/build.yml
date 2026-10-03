@@ -33,7 +33,7 @@ jobs:
 
       - name: Build Release
         shell: cmd
-        run: msbuild PN532-Aime-Reader.sln /p:Configuration=Release /p:Platform=x64 /m
+        run: msbuild PN532-Aime-Reader.sln /p:Configuration=Release /p:Platform="Any CPU" /m
 
       - name: Upload build
         uses: actions/upload-artifact@v4
