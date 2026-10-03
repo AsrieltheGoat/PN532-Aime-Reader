@@ -1,0 +1,45 @@
+name: Build NfcAime.Dll
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/**'
+      - '*.sln'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - '*.sln'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        shell: cmd
+        run: nuget restore PN532-Aime-Reader.sln
+
+      - name: Build Release
+        shell: cmd
+        run: msbuild PN532-Aime-Reader.sln /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: NfcAime-Dll
+          path: |
+            src/NfcAime.Dll/bin/Release/NfcAime.Dll.dll
+            src/NfcAime.Dll/bin/Release/NfcAime.Dll.pdb
+          if-no-files-found: error
